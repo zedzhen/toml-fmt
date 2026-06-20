@@ -13,7 +13,7 @@ from argparse import (
     Namespace,
     _ArgumentGroup,  # noqa: PLC2701
 )
-from collections import deque
+from collections import defaultdict, deque
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
@@ -131,6 +131,7 @@ class _Config(Generic[T]):
     check: bool  # check only
     no_print_diff: bool  # don't print diff
     opt: T
+    eol: str
 
 
 def _check_write_permission(parser: ArgumentParser, opt: FmtNamespace) -> None:
@@ -139,6 +140,26 @@ def _check_write_permission(parser: ArgumentParser, opt: FmtNamespace) -> None:
     for toml_path in opt.inputs:
         if toml_path is not None and not os.access(toml_path, os.W_OK):
             parser.error(f"argument inputs: cannot write path {toml_path}")
+
+
+_ALL_ENDINGS = (b"\r\n", b"\n")
+
+
+def _popular_eol(data: bytes) -> str:
+    counts = defaultdict(int)
+    for line in data.splitlines(keepends=True):
+        for ending in _ALL_ENDINGS:
+            if line.endswith(ending):
+                counts[ending] += 1
+                break
+
+    eol = "\n"
+    max_count = 0
+    for ending in _ALL_ENDINGS:
+        if counts[ending] > max_count:
+            max_count = counts[ending]
+            eol = ending.decode()
+    return eol
 
 
 def _cli_args(info: TOMLFormatter[T], args: Sequence[str]) -> list[_Config[T]]:
@@ -156,7 +177,14 @@ def _cli_args(info: TOMLFormatter[T], args: Sequence[str]) -> list[_Config[T]]:
     _check_write_permission(parser, info.opt)
     res = []
     for pyproject_toml in info.opt.inputs:
-        raw_pyproject_toml = sys.stdin.read() if pyproject_toml is None else pyproject_toml.read_text(encoding="utf-8")
+        if pyproject_toml is None:
+            raw_pyproject_toml = sys.stdin.read()
+            eol = "\n"
+        else:
+            bytes_pyproject_toml = pyproject_toml.read_bytes()
+            raw_pyproject_toml = bytes_pyproject_toml.decode().replace("\r\n", "\n")
+            eol = _popular_eol(bytes_pyproject_toml)
+
         config: dict[str, Any] | None = tomllib.loads(raw_pyproject_toml)
 
         parts = deque(info.override_cli_from_section)
@@ -182,6 +210,7 @@ def _cli_args(info: TOMLFormatter[T], args: Sequence[str]) -> list[_Config[T]]:
                 check=info.opt.check,
                 no_print_diff=info.opt.no_print_diff,
                 opt=override_opt,
+                eol=eol,
             )
         )
 
@@ -365,7 +394,7 @@ def _handle_one(info: TOMLFormatter[T], config: _Config[T]) -> bool:
         return changed
 
     if before != formatted and not config.check:
-        config.toml_filename.write_text(formatted, encoding="utf-8", newline="\n")
+        config.toml_filename.write_text(formatted, encoding="utf-8", newline=config.eol)
     if config.no_print_diff:
         return changed
     try:
